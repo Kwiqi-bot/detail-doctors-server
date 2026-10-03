@@ -17,29 +17,15 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 
-def send_telegram_message(text, keyboard=None):
-
-    data = {
-        "chat_id": CHAT_ID,
-        "text": text
-    }
-
-    if keyboard:
-        data["reply_markup"] = {
-            "inline_keyboard": keyboard
-        }
-
-    response = requests.post(
-        f"{TELEGRAM_API}/sendMessage",
+def telegram_request(method, data):
+    return requests.post(
+        f"{TELEGRAM_API}/{method}",
         json=data,
         timeout=10
     )
 
-    return response
-
 
 def set_webhook():
-
     if not TOKEN:
         return
 
@@ -49,12 +35,9 @@ def set_webhook():
     )
 
     try:
-        requests.post(
-            f"{TELEGRAM_API}/setWebhook",
-            json={
-                "url": webhook_url
-            },
-            timeout=10
+        telegram_request(
+            "setWebhook",
+            {"url": webhook_url}
         )
     except requests.RequestException:
         pass
@@ -62,7 +45,6 @@ def set_webhook():
 
 @app.route("/")
 def home():
-
     return "Detail Doctors Telegram Server работает!"
 
 
@@ -83,13 +65,11 @@ def send_message():
     comment = data.get("comment", "").strip()
 
     if not name or not phone or not service:
-
         return jsonify({
             "success": False,
             "error": "Не заполнены обязательные поля"
         }), 400
 
-    # Время Оренбурга
     now = datetime.now(
         ZoneInfo("Asia/Yekaterinburg")
     )
@@ -99,36 +79,41 @@ def send_message():
     message = (
         "НОВАЯ ЗАЯВКА\n"
         "━━━━━━━━━━━━━━━━\n\n"
-
         f"Имя: {name}\n"
         f"Телефон: {phone}\n"
         f"Услуга: {service}\n"
         f"Комментарий: {comment or 'Не указан'}\n\n"
-
         "━━━━━━━━━━━━━━━━\n"
-        f"Дата и время: {date_time}\n"
+        f"Дата и время: {date_time}"
     )
 
-    keyboard = [[
-        {
-            "text": "Принять заявку",
-            "callback_data": f"accept:{phone}"
-        },
-        {
-            "text": "Связаться с клиентом",
-            "callback_data": f"contact:{phone}"
-        }
-    ]]
+    keyboard = [
+        [
+            {
+                "text": "Принять заявку",
+                "callback_data": f"accept:{phone}"
+            },
+            {
+                "text": "Связаться с клиентом",
+                "callback_data": f"contact:{phone}"
+            }
+        ]
+    ]
 
     try:
 
-        response = send_telegram_message(
-            message,
-            keyboard
+        response = telegram_request(
+            "sendMessage",
+            {
+                "chat_id": CHAT_ID,
+                "text": message,
+                "reply_markup": {
+                    "inline_keyboard": keyboard
+                }
+            }
         )
 
         if response.ok:
-
             return jsonify({
                 "success": True
             })
@@ -156,20 +141,32 @@ def telegram_webhook():
     callback = update.get("callback_query")
 
     if not callback:
-        return jsonify({
-            "ok": True
-        })
+        return jsonify({"ok": True})
 
     callback_id = callback.get("id")
     data = callback.get("data", "")
-    message = callback.get("message", {})
 
+    message = callback.get("message", {})
+    message_id = message.get("message_id")
     chat_id = message.get(
         "chat",
         {}
     ).get("id")
 
-    message_id = message.get("message_id")
+    current_text = message.get("text", "")
+
+    user = callback.get("from", {})
+
+    username = user.get("username")
+
+    if username:
+        employee = f"@{username}"
+    else:
+        employee = user.get("first_name", "Сотрудник")
+
+    # -------------------------
+    # ПРИНЯТЬ ЗАЯВКУ
+    # -------------------------
 
     if data.startswith("accept:"):
 
@@ -179,48 +176,182 @@ def telegram_webhook():
             1
         )
 
-        text = (
-            "Заявка принята.\n\n"
-            f"Телефон клиента: {phone}"
+        if "Статус:" in current_text:
+
+            telegram_request(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Эта заявка уже обработана",
+                    "show_alert": True
+                }
+            )
+
+            return jsonify({"ok": True})
+
+        new_text = (
+            current_text
+            + "\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            f"Статус: ПРИНЯТА\n"
+            f"Принял: {employee}"
+        )
+
+        keyboard = [
+            [
+                {
+                    "text": "Выполнено",
+                    "callback_data": f"done:{phone}"
+                },
+                {
+                    "text": "Отменить",
+                    "callback_data": f"cancel:{phone}"
+                }
+            ],
+            [
+                {
+                    "text": "Связаться с клиентом",
+                    "callback_data": f"contact:{phone}"
+                }
+            ]
+        ]
+
+        try:
+
+            telegram_request(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Заявка принята"
+                }
+            )
+
+            telegram_request(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": new_text,
+                    "reply_markup": {
+                        "inline_keyboard": keyboard
+                    }
+                }
+            )
+
+        except requests.RequestException:
+            pass
+
+    # -------------------------
+    # ВЫПОЛНЕНО
+    # -------------------------
+
+    elif data.startswith("done:"):
+
+        phone = data.replace(
+            "done:",
+            "",
+            1
+        )
+
+        if "Статус: ПРИНЯТА" not in current_text:
+
+            telegram_request(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Сначала нужно принять заявку",
+                    "show_alert": True
+                }
+            )
+
+            return jsonify({"ok": True})
+
+        new_text = (
+            current_text
+            + "\n"
+            "Статус: ВЫПОЛНЕНО\n"
+            f"Закрыл заявку: {employee}"
         )
 
         try:
 
-            requests.post(
-                f"{TELEGRAM_API}/answerCallbackQuery",
-                json={
+            telegram_request(
+                "answerCallbackQuery",
+                {
                     "callback_query_id": callback_id,
-                    "text": "Заявка принята",
-                    "show_alert": False
-                },
-                timeout=10
+                    "text": "Заявка отмечена как выполненная"
+                }
             )
 
-            requests.post(
-                f"{TELEGRAM_API}/editMessageReplyMarkup",
-                json={
+            telegram_request(
+                "editMessageText",
+                {
                     "chat_id": chat_id,
                     "message_id": message_id,
-                    "reply_markup": {
-                        "inline_keyboard": [[
-                            {
-                                "text": "Заявка принята",
-                                "callback_data": "accepted"
-                            },
-                            {
-                                "text": "Связаться с клиентом",
-                                "callback_data": f"contact:{phone}"
-                            }
-                        ]]
-                    }
-                },
-                timeout=10
+                    "text": new_text
+                }
             )
-
-            send_telegram_message(text)
 
         except requests.RequestException:
             pass
+
+    # -------------------------
+    # ОТМЕНА
+    # -------------------------
+
+    elif data.startswith("cancel:"):
+
+        phone = data.replace(
+            "cancel:",
+            "",
+            1
+        )
+
+        if "Статус: ПРИНЯТА" not in current_text:
+
+            telegram_request(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Эта заявка уже обработана",
+                    "show_alert": True
+                }
+            )
+
+            return jsonify({"ok": True})
+
+        new_text = (
+            current_text
+            + "\n"
+            "Статус: ОТМЕНЕНА\n"
+            f"Отменил: {employee}"
+        )
+
+        try:
+
+            telegram_request(
+                "answerCallbackQuery",
+                {
+                    "callback_query_id": callback_id,
+                    "text": "Заявка отменена"
+                }
+            )
+
+            telegram_request(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": new_text
+                }
+            )
+
+        except requests.RequestException:
+            pass
+
+    # -------------------------
+    # СВЯЗАТЬСЯ С КЛИЕНТОМ
+    # -------------------------
 
     elif data.startswith("contact:"):
 
@@ -232,25 +363,21 @@ def telegram_webhook():
 
         try:
 
-            requests.post(
-                f"{TELEGRAM_API}/answerCallbackQuery",
-                json={
+            telegram_request(
+                "answerCallbackQuery",
+                {
                     "callback_query_id": callback_id,
-                    "text": f"Телефон: {phone}",
+                    "text": f"Телефон клиента: {phone}",
                     "show_alert": True
-                },
-                timeout=10
+                }
             )
 
         except requests.RequestException:
             pass
 
-    return jsonify({
-        "ok": True
-    })
+    return jsonify({"ok": True})
 
 
-# Устанавливаем webhook при запуске
 set_webhook()
 
 
